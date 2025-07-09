@@ -1,0 +1,113 @@
+# 📦 Install necessary libraries
+!pip install -q transformers datasets scikit-learn torch nltk
+
+# 📚 Download NLTK assets
+import nltk
+nltk.download('punkt')
+nltk.download('stopwords')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
+
+# 📂 Import libraries
+import pandas as pd
+import re
+import torch
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, accuracy_score
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
+from transformers import DataCollatorWithPadding
+from datasets import Dataset
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+
+# 🧹 Text Preprocessing
+stop_words = set(stopwords.words('english'))
+lemmatizer = WordNetLemmatizer()
+
+def preprocess(text):
+    text = text.lower()
+    text = re.sub(r"http\S+|www\S+|https\S+", '', text)
+    text = re.sub(r'\S+@\S+', '', text)
+    text = re.sub(r'\d+', '', text)
+    text = re.sub(r'[^a-z\s]', '', text)
+    tokens = word_tokenize(text)
+    cleaned = [lemmatizer.lemmatize(t) for t in tokens if t not in stop_words and len(t) > 2]
+    return ' '.join(cleaned)
+
+# 📁 Load your dataset (Replace with your actual path)
+df = pd.read_csv("your_dataset.csv")  # must have 'text' and 'label' columns
+
+# 🧼 Preprocess texts
+df['text'] = df['text'].apply(preprocess)
+
+# 🏷️ Encode emotion labels
+label_encoder = LabelEncoder()
+df['label'] = label_encoder.fit_transform(df['label'])  # Maps: surprise=0, disgust=1, ...
+
+# 🔀 Split into train/test (optional here if not using Hugging Face datasets split)
+dataset = Dataset.from_pandas(df[['text', 'label']])
+
+# 🧠 Load BERT tokenizer and model
+tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=len(label_encoder.classes_))
+
+# 🔢 Tokenization
+def tokenize(example):
+    return tokenizer(example['text'], truncation=True, padding=True)
+
+tokenized_dataset = dataset.map(tokenize, batched=True)
+
+# 🧪 Metrics
+def compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    preds = torch.argmax(torch.tensor(logits), dim=1).numpy()
+    acc = accuracy_score(labels, preds)
+    report = classification_report(labels, preds, target_names=label_encoder.classes_, output_dict=True)
+    return {"accuracy": acc, "f1": report["weighted avg"]["f1-score"]}
+
+# ⚙️ Training arguments
+training_args = TrainingArguments(
+    output_dir="./bert-emotion",
+    evaluation_strategy="epoch",
+    save_strategy="epoch",
+    logging_strategy="epoch",
+    num_train_epochs=3,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16,
+    learning_rate=2e-5,
+    load_best_model_at_end=True,
+    metric_for_best_model="accuracy"
+)
+
+# 🧑‍🏫 Trainer setup
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_dataset,
+    eval_dataset=tokenized_dataset,
+    tokenizer=tokenizer,
+    data_collator=DataCollatorWithPadding(tokenizer),
+    compute_metrics=compute_metrics
+)
+
+# 🚀 Train the model
+trainer.train()
+
+# 💾 Save the model and label encoder
+model.save_pretrained("./bert-emotion")
+tokenizer.save_pretrained("./bert-emotion")
+import joblib
+joblib.dump(label_encoder, "label_encoder.pkl")
+
+# ✅ Predict on new text
+def predict_emotion(text):
+    cleaned = preprocess(text)
+    inputs = tokenizer(cleaned, return_tensors="pt", truncation=True, padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        pred = torch.argmax(outputs.logits, dim=1).item()
+    return label_encoder.inverse_transform([pred])[0]
+
+# 🔍 Example test
+print(predict_emotion("I'm feeling so excited and full of energy today!"))
